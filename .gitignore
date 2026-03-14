@@ -1,0 +1,8 @@
+node_modules/
+.next/
+.env*.local
+.DS_Store
+src-back/binaries
+src-python/.venv
+src-python/dist
+src-python/build
