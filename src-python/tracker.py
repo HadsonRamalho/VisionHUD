@@ -4,14 +4,25 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from collections import deque
 
 import cv2
+import numpy as np
 from ultralytics import YOLO
 
 
-def processar_video_cyberpunk(
-    video_entrada: str, video_saida: str, musica_lofi: str = None
-):
+def desenhar_reticulas(img, x1, y1, x2, y2, cor, espessura=2, comprimento=15):
+    cv2.line(img, (x1, y1), (x1 + comprimento, y1), cor, espessura)
+    cv2.line(img, (x1, y1), (x1, y1 + comprimento), cor, espessura)
+    cv2.line(img, (x2, y1), (x2 - comprimento, y1), cor, espessura)
+    cv2.line(img, (x2, y1), (x2, y1 + comprimento), cor, espessura)
+    cv2.line(img, (x1, y2), (x1 + comprimento, y2), cor, espessura)
+    cv2.line(img, (x1, y2), (x1, y2 - comprimento), cor, espessura)
+    cv2.line(img, (x2, y2), (x2 - comprimento, y2), cor, espessura)
+    cv2.line(img, (x2, y2), (x2, y2 - comprimento), cor, espessura)
+
+
+def processar_video(video_entrada: str, video_saida: str, musica_lofi: str = None):
     model = YOLO("yolov8n.pt")
 
     cap = cv2.VideoCapture(video_entrada)
@@ -30,42 +41,81 @@ def processar_video_cyberpunk(
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(temp_video, fourcc, fps, (largura, altura))
 
-    COR_BOX = (22, 158, 105)
-    COR_LINHA = (158, 230, 202)
+    CORES_CLASSES = {
+        0: (0, 255, 150),
+        2: (255, 100, 255),
+        3: (50, 200, 255),
+        7: (255, 50, 50),
+    }
+    COR_DEFAULT = (158, 230, 202)
     DISTANCIA_MAXIMA = 250
 
-    print("[*] Iniciando inferência e renderização...", flush=True)
+    historico_rastreio = {}
+
+    print("[*] Iniciando inferência e renderização avançada...", flush=True)
 
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
 
-        resultados = model.track(frame, persist=True, verbose=False)
+        resultados = model.track(frame, persist=True, conf=0.45, verbose=False)
         centroides = []
 
         if resultados[0].boxes is not None and resultados[0].boxes.id is not None:
             boxes = resultados[0].boxes.xyxy.cpu().numpy()
             ids = resultados[0].boxes.id.cpu().numpy()
+            confs = resultados[0].boxes.conf.cpu().numpy()
+            clss = resultados[0].boxes.cls.cpu().numpy()
 
-            for box, obj_id in zip(boxes, ids):
+            for box, obj_id, conf, cls in zip(boxes, ids, confs, clss):
                 x1, y1, x2, y2 = map(int, box)
                 cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
                 centroides.append((cx, cy))
 
-                cv2.rectangle(frame, (x1, y1), (x2, y2), COR_BOX, 2)
+                cor_obj = CORES_CLASSES.get(int(cls), COR_DEFAULT)
 
-                texto_hud = f"OBJ_{int(obj_id)} [V169]"
+                if obj_id not in historico_rastreio:
+                    historico_rastreio[obj_id] = deque(maxlen=15)
+                historico_rastreio[obj_id].append((cx, cy))
+
+                hist = historico_rastreio[obj_id]
+
+                velocidade = 0
+                if len(hist) > 5:
+                    dx = hist[-1][0] - hist[0][0]
+                    dy = hist[-1][1] - hist[0][1]
+                    distancia_percorrida = math.hypot(dx, dy)
+                    tempo_segundos = len(hist) / fps
+                    velocidade = int(distancia_percorrida / tempo_segundos)
+
+                desenhar_reticulas(frame, x1, y1, x2, y2, cor_obj)
+
+                largura_box = x2 - x1
+                largura_barra = int(largura_box * conf)
+                cv2.rectangle(frame, (x1, y1 - 25), (x2, y1 - 20), (50, 50, 50), -1)
+                cv2.rectangle(
+                    frame, (x1, y1 - 25), (x1 + largura_barra, y1 - 20), cor_obj, -1
+                )
+
+                texto_hud = f"TGT_{int(obj_id)} [{int(conf * 100)}%] V:{velocidade}px/s"
                 cv2.putText(
                     frame,
                     texto_hud,
-                    (x1, y1 - 10),
+                    (x1, y1 - 32),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    COR_BOX,
+                    0.45,
+                    cor_obj,
                     1,
                 )
-                cv2.circle(frame, (cx, cy), 3, COR_LINHA, -1)
+
+                for k in range(1, len(hist)):
+                    if hist[k - 1] is None or hist[k] is None:
+                        continue
+                    espessura = int(np.sqrt(16 / float(len(hist) - k + 1)) * 1.5)
+                    cv2.line(frame, hist[k - 1], hist[k], cor_obj, espessura)
+
+                cv2.circle(frame, (cx, cy), 3, (255, 255, 255), -1)
 
         for i in range(len(centroides)):
             for j in range(i + 1, len(centroides)):
@@ -74,7 +124,7 @@ def processar_video_cyberpunk(
                 dist = math.hypot(pt2[0] - pt1[0], pt2[1] - pt1[1])
 
                 if dist < DISTANCIA_MAXIMA:
-                    cv2.line(frame, pt1, pt2, COR_LINHA, 1)
+                    cv2.line(frame, pt1, pt2, COR_DEFAULT, 1)
 
         writer.write(frame)
 
@@ -142,4 +192,4 @@ if __name__ == "__main__":
     video_out = sys.argv[2]
     audio_in = sys.argv[3] if len(sys.argv) > 3 else None
 
-    processar_video_cyberpunk(video_in, video_out, audio_in)
+    processar_video(video_in, video_out, audio_in)
